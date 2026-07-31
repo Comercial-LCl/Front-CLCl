@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router';
 import QrScanner from 'qr-scanner';
 import useInvoicingStore from '@/invoicing/application/invoicing.store.js';
 import { parseFacturaQr, normalizarFecha } from '@/invoicing/infrastructure/qr-parser.js';
+import { decodificarConVariantes, cargarImagenComoElemento, dibujarEnCanvas } from '@/invoicing/infrastructure/image-processing.js';
 
 const router = useRouter();
 const store = useInvoicingStore();
@@ -15,6 +16,7 @@ let scanner = null;
 const fase = ref('escaneando'); // 'escaneando' -> 'revisando' -> 'foto' -> 'enviando'
 const errorMsg = ref('');
 const consultandoRuc = ref(false);
+const procesandoQr = ref(false);
 
 const camaras = ref([]);
 const camaraSeleccionada = ref(null);
@@ -25,8 +27,8 @@ const flashActivo = ref(false);
 const soportaExposicion = ref(false);
 const exposicionReducida = ref(false);
 
-const calidadImagen = ref(null); // 'nitido' | 'borroso' | null
-const calidadFoto = ref(null); // nitidez de la foto ya capturada
+const calidadImagen = ref(null); // 'nitido' | 'borroso' | null (en vivo)
+const calidadFoto = ref(null);   // nitidez de la foto de productos ya capturada
 const segundosSinDetectar = ref(0);
 let intervaloCalidad = null;
 let intervaloContador = null;
@@ -47,12 +49,12 @@ const enviarSinFoto = ref(false);
 const hintProgresivo = computed(() => {
   if (fase.value !== 'escaneando') return null;
   if (segundosSinDetectar.value > 15) {
-    return 'Si sigue sin leerlo, usa "subir foto del QR" con tu celular — suele ser más confiable que la webcam.';
+    return 'Si sigue sin leerlo, prueba "Tomar foto del QR" o "subir foto del QR" desde tu celular.';
   }
   if (segundosSinDetectar.value > 8) {
     return calidadImagen.value === 'borroso'
         ? 'Se ve borroso: aléjate o acércate despacio hasta que el recuadro se vea nítido.'
-        : 'Inclina un poco el papel para que la luz no rebote directo hacia la cámara, o hazle sombra con la mano.';
+        : 'Inclina un poco el papel para que la luz no rebote directo hacia la cámara, o estíralo si está arrugado.';
   }
   return null;
 });
@@ -105,7 +107,6 @@ function evaluarNitidez() {
   calidadImagen.value = varianza > 350 ? 'nitido' : 'borroso';
 }
 
-/** Extraída para reutilizarla también sobre la foto ya capturada, no solo el video en vivo */
 function calcularVarianzaLaplaciano(ctx, tamano) {
   const { data } = ctx.getImageData(0, 0, tamano, tamano);
   const gris = new Float32Array(tamano * tamano);
@@ -128,7 +129,6 @@ function calcularVarianzaLaplaciano(ctx, tamano) {
   return sumaCuadrados / n - media * media;
 }
 
-/** Evalúa la nitidez de la foto ya tomada (no del video en vivo) */
 function evaluarNitidezFoto(canvasOrigen) {
   const tamano = 160;
   const canvas = document.createElement('canvas');
@@ -151,8 +151,6 @@ async function toggleFlash() {
   }
 }
 
-/** Detecta si el navegador/cámara permite controlar la exposición manualmente.
- *  Soporte inconsistente: común en Android Chrome, raro en webcams de Windows. */
 async function verificarSoporteExposicion() {
   try {
     const track = videoRef.value?.srcObject?.getVideoTracks?.()[0];
@@ -164,8 +162,6 @@ async function verificarSoporteExposicion() {
   }
 }
 
-/** Baja la compensación de exposición al mínimo soportado, para contrarrestar
- *  sobreexposición/reflejos que "lavan" el contraste blanco/negro del QR. */
 async function reducirBrillo() {
   try {
     const track = videoRef.value?.srcObject?.getVideoTracks?.()[0];
@@ -182,7 +178,7 @@ async function reducirBrillo() {
       advanced: [{ exposureMode: 'manual', exposureCompensation: valor }],
     });
   } catch {
-    // el dispositivo no permite exposición manual; no bloqueamos el flujo
+    // no soportado, ignoramos
   }
 }
 
@@ -214,51 +210,40 @@ async function procesarTextoQr(rawText) {
   }
 }
 
-/** Convierte la imagen a blanco/negro puro (binarización por umbral) antes de decodificar.
- *  Puede rescatar QRs cuyo contraste quedó débil por reflejos o sobreexposición. */
-function mejorarContrasteImagen(archivo) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = img.width;
-      canvas.height = img.height;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0);
-
-      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const data = imageData.data;
-
-      for (let i = 0; i < data.length; i += 4) {
-        const gris = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-        const valor = gris > 150 ? 255 : 0; // umbral — ajustar si hace falta
-        data[i] = data[i + 1] = data[i + 2] = valor;
-      }
-      ctx.putImageData(imageData, 0, 0);
-      resolve(canvas);
-    };
-    img.onerror = reject;
-    img.src = URL.createObjectURL(archivo);
-  });
+/** Opción A: captura una foto FIJA de alta resolución del QR (no un frame de video en vivo)
+ *  y la decodifica probando varias variantes de procesamiento (opción C). Sirve para QR
+ *  pequeños o de bajo contraste que el escaneo continuo no logra atrapar. */
+async function capturarFotoQr() {
+  procesandoQr.value = true;
+  errorMsg.value = '';
+  try {
+    const canvas = dibujarEnCanvas(videoRef.value);
+    const resultado = await decodificarConVariantes(canvas);
+    await procesarTextoQr(resultado.data);
+  } catch {
+    errorMsg.value = 'No se pudo leer el QR en la foto. Prueba estirar el papel, acercarte más, o usa "subir foto del QR".';
+  } finally {
+    procesandoQr.value = false;
+  }
 }
 
+/** Fallback: decodifica un QR desde una foto subida (celular u otra fuente), probando
+ *  varias variantes de procesamiento de imagen (opción C) en vez de una sola técnica. */
 async function onQrImagenSeleccionada(event) {
   const archivo = event.target.files[0];
   if (!archivo) return;
 
+  procesandoQr.value = true;
+  errorMsg.value = '';
   try {
-    const canvasProcesado = await mejorarContrasteImagen(archivo);
-    const resultado = await QrScanner.scanImage(canvasProcesado, { returnDetailedScanResult: true });
+    const img = await cargarImagenComoElemento(archivo);
+    const canvas = dibujarEnCanvas(img);
+    const resultado = await decodificarConVariantes(canvas);
     await procesarTextoQr(resultado.data);
   } catch {
-    // si la versión binarizada falla, probamos con la imagen original sin procesar
-    try {
-      const resultado = await QrScanner.scanImage(archivo, { returnDetailedScanResult: true });
-      await procesarTextoQr(resultado.data);
-    } catch {
-      errorMsg.value = 'No se pudo leer el QR en esa imagen. Prueba con otra foto, más cerca y sin reflejos.';
-    }
+    errorMsg.value = 'No se pudo leer el QR en esa imagen. Prueba con otra foto, más cerca, sin reflejos y con el papel bien estirado.';
   } finally {
+    procesandoQr.value = false;
     event.target.value = '';
   }
 }
@@ -408,9 +393,10 @@ onMounted(() => {
       <p class="hint">Apunta la cámara al código QR, dentro del recuadro.</p>
       <p class="hint hint-tip">
         Si hay mucha luz o reflejos, inclina un poco el papel o hazle sombra con la mano —
-        el brillo directo hace que el QR pierda el contraste que necesita para leerse.
+        y si está arrugado, estíralo con la mano antes de escanear.
       </p>
       <p v-if="hintProgresivo" class="hint hint-progresivo">{{ hintProgresivo }}</p>
+      <p v-if="procesandoQr" class="hint hint-progresivo">Analizando la imagen, un momento…</p>
 
       <div class="camara-selector" v-if="camaras.length > 1">
         <pv-select
@@ -425,10 +411,19 @@ onMounted(() => {
 
       <div class="scan-alt-actions">
         <pv-button
+            label="No detecta solo — tomar foto del QR"
+            icon="pi pi-camera"
+            severity="secondary"
+            text
+            :loading="procesandoQr"
+            @click="capturarFotoQr"
+        />
+        <pv-button
             label="Mi cámara no enfoca — subir foto del QR"
             icon="pi pi-image"
             severity="secondary"
             text
+            :disabled="procesandoQr"
             @click="abrirSelectorImagenQr"
         />
         <input ref="qrFileInput" type="file" accept="image/*" hidden @change="onQrImagenSeleccionada" />
@@ -437,6 +432,7 @@ onMounted(() => {
             label="El QR no se lee — ingresar datos manualmente"
             severity="secondary"
             text
+            :disabled="procesandoQr"
             @click="ingresarManualmente"
         />
       </div>
@@ -548,6 +544,7 @@ onMounted(() => {
   background: #000;
 }
 .camera-video { width: 100%; height: 100%; max-height: 45vh; object-fit: cover; display: block; }
+.photo-preview-in-camera { width: 100%; height: 100%; object-fit: contain; background: #000; }
 
 .scan-overlay {
   position: absolute;
@@ -559,17 +556,9 @@ onMounted(() => {
   pointer-events: none;
 }
 
-.scan-frame {
-  position: relative;
-  width: 60%;
-  aspect-ratio: 1;
-}
-.corner {
-  position: absolute;
-  width: 28px;
-  height: 28px;
-  border: 3px solid #9ca3af;
-}
+.scan-frame { position: relative; width: 60%; aspect-ratio: 1; }
+.scan-frame-wide { width: 85%; aspect-ratio: 16/10; }
+.corner { position: absolute; width: 28px; height: 28px; border: 3px solid #9ca3af; }
 .scan-frame.nitido .corner { border-color: #22c55e; }
 .scan-frame.borroso .corner { border-color: #f59e0b; }
 .corner-tl { top: 0; left: 0; border-right: none; border-bottom: none; }
@@ -590,6 +579,17 @@ onMounted(() => {
 .quality-badge.nitido { background: #22c55e; }
 .quality-badge.borroso { background: #f59e0b; }
 
+.quality-badge-static {
+  display: inline-block;
+  padding: 0.3rem 0.9rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #fff;
+  background: #22c55e;
+}
+.quality-badge-static.borroso { background: #f59e0b; }
+
 .camera-controls {
   position: absolute;
   top: 8px;
@@ -605,12 +605,12 @@ onMounted(() => {
 
 .review-panel, .photo-panel { display: flex; flex-direction: column; gap: 1rem; }
 .fields-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.25rem; }
-.photo-preview { width: 100%; border-radius: 8px; }
 
 .hint { color: #6b7280; }
 .hint-strong { color: #374151; font-size: 0.95rem; }
 .hint-tip { font-size: 0.9rem; }
 .hint-progresivo { color: #b45309; font-weight: 500; }
+.hint-warning { color: #b45309; font-weight: 500; }
 
 .bottom-actions {
   position: sticky;
@@ -622,20 +622,4 @@ onMounted(() => {
   gap: 1rem;
   box-shadow: 0 -2px 8px rgba(0,0,0,0.08);
 }
-.scan-frame-wide { width: 85%; aspect-ratio: 16/10; }
-
-.photo-preview-in-camera { width: 100%; height: 100%; object-fit: contain; background: #000; }
-
-.quality-badge-static {
-  display: inline-block;
-  padding: 0.3rem 0.9rem;
-  border-radius: 999px;
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: #fff;
-  background: #22c55e;
-}
-.quality-badge-static.borroso { background: #f59e0b; }
-
-.hint-warning { color: #b45309; font-weight: 500; }
 </style>
