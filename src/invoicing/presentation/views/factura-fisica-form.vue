@@ -3,7 +3,7 @@ import { ref, computed, onBeforeUnmount, nextTick, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import QrScanner from 'qr-scanner';
 import useInvoicingStore from '@/invoicing/application/invoicing.store.js';
-import { parseFacturaQr } from '@/invoicing/infrastructure/qr-parser.js';
+import { parseFacturaQr, normalizarFecha } from '@/invoicing/infrastructure/qr-parser.js';
 
 const router = useRouter();
 const store = useInvoicingStore();
@@ -26,6 +26,7 @@ const soportaExposicion = ref(false);
 const exposicionReducida = ref(false);
 
 const calidadImagen = ref(null); // 'nitido' | 'borroso' | null
+const calidadFoto = ref(null); // nitidez de la foto ya capturada
 const segundosSinDetectar = ref(0);
 let intervaloCalidad = null;
 let intervaloContador = null;
@@ -83,7 +84,9 @@ async function iniciarEscaneo() {
 }
 
 function evaluarNitidez() {
-  if (fase.value !== 'escaneando') return;
+  const enVivo = fase.value === 'escaneando' || (fase.value === 'foto' && !fotoBlob.value);
+  if (!enVivo) return;
+
   const video = videoRef.value;
   if (!video || video.readyState < 2 || !video.videoWidth) return;
 
@@ -98,6 +101,12 @@ function evaluarNitidez() {
   const sy = (video.videoHeight - lado) / 2;
   ctx.drawImage(video, sx, sy, lado, lado, 0, 0, tamano, tamano);
 
+  const varianza = calcularVarianzaLaplaciano(ctx, tamano);
+  calidadImagen.value = varianza > 350 ? 'nitido' : 'borroso';
+}
+
+/** Extraída para reutilizarla también sobre la foto ya capturada, no solo el video en vivo */
+function calcularVarianzaLaplaciano(ctx, tamano) {
   const { data } = ctx.getImageData(0, 0, tamano, tamano);
   const gris = new Float32Array(tamano * tamano);
   for (let i = 0; i < gris.length; i++) {
@@ -116,9 +125,20 @@ function evaluarNitidez() {
     }
   }
   const media = suma / n;
-  const varianza = sumaCuadrados / n - media * media;
+  return sumaCuadrados / n - media * media;
+}
 
-  calidadImagen.value = varianza > 350 ? 'nitido' : 'borroso';
+/** Evalúa la nitidez de la foto ya tomada (no del video en vivo) */
+function evaluarNitidezFoto(canvasOrigen) {
+  const tamano = 160;
+  const canvas = document.createElement('canvas');
+  canvas.width = tamano;
+  canvas.height = tamano;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(canvasOrigen, 0, 0, tamano, tamano);
+
+  const varianza = calcularVarianzaLaplaciano(ctx, tamano);
+  calidadFoto.value = varianza > 350 ? 'nitido' : 'borroso';
 }
 
 async function toggleFlash() {
@@ -263,6 +283,8 @@ function capturarFoto() {
   canvas.height = video.videoHeight;
   canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
 
+  evaluarNitidezFoto(canvas);
+
   canvas.toBlob(blob => {
     fotoBlob.value = blob;
     fotoPreviewUrl.value = URL.createObjectURL(blob);
@@ -273,6 +295,7 @@ function capturarFoto() {
 function reintentarFoto() {
   fotoBlob.value = null;
   fotoPreviewUrl.value = '';
+  calidadFoto.value = null;
 }
 
 function omitirFoto() {
@@ -294,7 +317,7 @@ async function enviar() {
   formData.append('proveedorRuc', form.value.proveedorRuc);
   formData.append('serie', form.value.serie);
   formData.append('numero', form.value.numero);
-  formData.append('fechaEmision', form.value.fechaEmision);
+  formData.append('fechaEmision', normalizarFecha(form.value.fechaEmision));
   formData.append('montoTotal', form.value.montoTotal);
   formData.append('moneda', form.value.moneda);
   if (fotoBlob.value) {
@@ -345,10 +368,10 @@ onMounted(() => {
     <h2>Registrar factura física</h2>
 
     <div class="camera-wrap" v-show="fase !== 'enviando'">
-      <video ref="videoRef" class="camera-video"></video>
+      <video ref="videoRef" class="camera-video" v-show="!fotoBlob"></video>
 
-      <div v-if="fase === 'escaneando'" class="scan-overlay">
-        <div class="scan-frame" :class="calidadImagen">
+      <div v-if="fase === 'escaneando' || (fase === 'foto' && !fotoBlob)" class="scan-overlay">
+        <div class="scan-frame" :class="[calidadImagen, { 'scan-frame-wide': fase === 'foto' }]">
           <span class="corner corner-tl"></span>
           <span class="corner corner-tr"></span>
           <span class="corner corner-bl"></span>
@@ -377,6 +400,8 @@ onMounted(() => {
           />
         </div>
       </div>
+
+      <img v-if="fotoBlob" :src="fotoPreviewUrl" alt="Foto de la factura" class="photo-preview-in-camera" />
     </div>
 
     <template v-if="fase === 'escaneando'">
@@ -455,8 +480,11 @@ onMounted(() => {
       <template v-if="!fotoBlob && !enviarSinFoto">
         <p class="hint hint-strong">
           Encuadra <strong>solo el detalle de productos</strong> de la factura (la tabla de ítems y
-          precios) — no es necesario que salga el QR ni los bordes del papel. Eso es lo que la IA
-          usa para reconocer cada producto.
+          precios), dentro del recuadro — no es necesario que salga el QR ni los bordes del papel.
+        </p>
+        <p class="hint hint-tip">
+          Buena luz uniforme y sin reflejos sobre el papel ayuda a que la IA lea mejor cada producto.
+          Evita que la sombra de tu mano o del celular tape el texto.
         </p>
         <pv-button
             label="Registrar sin foto (sin detalle de productos)"
@@ -465,9 +493,16 @@ onMounted(() => {
             @click="omitirFoto"
         />
       </template>
+
       <template v-else-if="fotoBlob">
-        <img :src="fotoPreviewUrl" alt="Foto de la factura" class="photo-preview" />
+        <div class="quality-badge-static" :class="calidadFoto">
+          {{ calidadFoto === 'nitido' ? 'Foto nítida' : 'La foto se ve borrosa' }}
+        </div>
+        <p v-if="calidadFoto === 'borroso'" class="hint hint-warning">
+          Si la IA no logra leer bien los productos con esta foto, puedes repetirla.
+        </p>
       </template>
+
       <template v-else>
         <p class="hint">Vas a registrar esta factura sin foto ni detalle de productos.</p>
       </template>
@@ -587,4 +622,20 @@ onMounted(() => {
   gap: 1rem;
   box-shadow: 0 -2px 8px rgba(0,0,0,0.08);
 }
+.scan-frame-wide { width: 85%; aspect-ratio: 16/10; }
+
+.photo-preview-in-camera { width: 100%; height: 100%; object-fit: contain; background: #000; }
+
+.quality-badge-static {
+  display: inline-block;
+  padding: 0.3rem 0.9rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #fff;
+  background: #22c55e;
+}
+.quality-badge-static.borroso { background: #f59e0b; }
+
+.hint-warning { color: #b45309; font-weight: 500; }
 </style>
