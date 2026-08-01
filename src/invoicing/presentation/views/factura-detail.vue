@@ -34,7 +34,7 @@ onMounted(async () => {
           <div><strong>Tipo:</strong> {{ factura.tipo }}</div>
           <div><strong>Proveedor:</strong> {{ store.getProveedorLabel(factura.proveedorId) }}</div>
           <div><strong>Categoría:</strong> {{ store.getCategoriaNombre(factura.categoriaId) }}</div>
-          <div><strong>Fecha de emisión:</strong> {{ factura.fechaEmision }}</div>
+          <div><strong>Fecha de emisión:</strong> {{ formatearFecha(factura.fechaEmision) }}</div>
           <div><strong>Monto total:</strong> {{ factura.montoTotal }} {{ factura.moneda }}</div>
           <div>
             <strong>Estado:</strong>

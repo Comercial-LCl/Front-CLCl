@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import useInvoicingStore from '@/invoicing/application/invoicing.store.js';
+import { formatearFecha } from '@/shared/utils/date-utils.js';
 
 const router = useRouter();
 const store = useInvoicingStore();
@@ -66,7 +67,9 @@ function verDetalle(factura) {
       <pv-column header="Categoría">
         <template #body="{ data }">{{ store.getCategoriaNombre(data.categoriaId) }}</template>
       </pv-column>
-      <pv-column field="fechaEmision" header="Fecha" />
+      <pv-column header="Fecha">
+        <template #body="{ data }">{{ formatearFecha(data.fechaEmision) }}</template>
+      </pv-column>
       <pv-column header="Monto">
         <template #body="{ data }">{{ data.montoTotal }} {{ data.moneda }}</template>
       </pv-column>
