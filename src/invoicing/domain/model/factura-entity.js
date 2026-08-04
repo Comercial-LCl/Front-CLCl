@@ -15,6 +15,8 @@ export class Factura {
                     archivoUrl            = '',
                     estadoProcesamiento   = '',
                     items                 = [],
+                    confianzaCampos       = null,
+                    requiereRevision      = false,
                 }) {
         this.id                  = id;
         this.proveedorId         = proveedorId;
@@ -29,5 +31,7 @@ export class Factura {
         this.archivoUrl          = archivoUrl;
         this.estadoProcesamiento = estadoProcesamiento;
         this.items               = (items ?? []).map(i => new ItemFactura(i));
+        this.confianzaCampos     = confianzaCampos;
+        this.requiereRevision    = requiereRevision;
     }
 }

@@ -2,6 +2,7 @@ import {InvoicingApi} from "@/invoicing/infrastructure/invoicing-api.js";
 import {FacturaAssembler} from "@/invoicing/infrastructure/factura.assembler.js";
 import {ProveedorAssembler} from "@/invoicing/infrastructure/proveedor.assembler.js";
 import {CategoriaAssembler} from "@/invoicing/infrastructure/categoria.assembler.js";
+import {ProductoAssembler} from "@/invoicing/infrastructure/producto.assembler.js";
 import {defineStore} from "pinia";
 import {ref} from "vue";
 
@@ -19,6 +20,11 @@ const useInvoicingStore = defineStore('invoicing', () => {
 
     const resumenPorCategoria    = ref([]);
     const resumenPorPeriodoTotal = ref(null);
+
+    /** Cacheado por proveedorId, para no repetir la petición al volver a su detalle */
+    const productosPorProveedor = ref({});
+    /** Cacheado por productoId */
+    const historialPrecios = ref({});
 
     const errors = ref([]);
 
@@ -49,9 +55,6 @@ const useInvoicingStore = defineStore('invoicing', () => {
         return invoicingApi.registrarFacturaFisica(formData).then(async response => {
             const nuevaFactura = FacturaAssembler.toEntityFromResponse(response);
             facturas.value.unshift(nuevaFactura);
-            // El backend puede haber creado un proveedor/categoría nuevo automáticamente
-            // (por RUC nuevo, o por clasificación de la IA) — refrescamos ambos catálogos
-            // para que el detalle no muestre el fallback "Proveedor #id".
             await Promise.all([fetchProveedores(), fetchCategorias()]);
             return nuevaFactura;
         });
@@ -84,7 +87,6 @@ const useInvoicingStore = defineStore('invoicing', () => {
         });
     }
 
-    /** 404 => RUC no encontrado en SUNAT/Decolecta, no se trata como error de la app */
     async function consultarRuc(ruc) {
         try {
             const response = await invoicingApi.consultarRuc(ruc);
@@ -121,7 +123,27 @@ const useInvoicingStore = defineStore('invoicing', () => {
         });
     }
 
-    /** Resuelve "RUC — Razón social" para mostrar en listas, igual que authStore.getUsername en SkillSwap */
+    function fetchProductosPorProveedor(proveedorId) {
+        return invoicingApi.getProductosPorProveedor(proveedorId).then(response => {
+            const productos = ProductoAssembler.toEntitiesFromResponse(response);
+            productosPorProveedor.value = { ...productosPorProveedor.value, [proveedorId]: productos };
+            return productos;
+        }).catch(error => {
+            errors.value.push(error);
+            return [];
+        });
+    }
+
+    function fetchHistorialPrecios(productoId) {
+        return invoicingApi.getHistorialPrecios(productoId).then(response => {
+            historialPrecios.value = { ...historialPrecios.value, [productoId]: response.data };
+            return response.data;
+        }).catch(error => {
+            errors.value.push(error);
+            return [];
+        });
+    }
+
     function getProveedorLabel(id) {
         const encontrado = proveedores.value.find(p => p.id === id);
         return encontrado ? `${encontrado.ruc} — ${encontrado.razonSocial}` : `Proveedor #${id}`;
@@ -138,11 +160,13 @@ const useInvoicingStore = defineStore('invoicing', () => {
         proveedores, proveedoresLoaded,
         categorias, categoriasLoaded,
         resumenPorCategoria, resumenPorPeriodoTotal,
+        productosPorProveedor, historialPrecios,
         errors,
         fetchFacturas, filtrarFacturas, fetchFacturaById,
         registrarFacturaFisica, registrarFacturaElectronica, corregirFactura,
         fetchProveedores, consultarRuc, fetchCategorias,
         fetchResumenPorCategoria, fetchResumenPorPeriodo,
+        fetchProductosPorProveedor, fetchHistorialPrecios,
         getProveedorLabel, getCategoriaNombre,
     };
 });

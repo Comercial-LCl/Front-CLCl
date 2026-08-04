@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import useInvoicingStore from '@/invoicing/application/invoicing.store.js';
 import { formatearFecha } from '@/shared/utils/date-utils.js';
@@ -11,11 +11,21 @@ const filtroProveedorId = ref(null);
 const filtroCategoriaId = ref(null);
 const filtroDesde = ref(null);
 const filtroHasta = ref(null);
+const soloRevision = ref(false);
 
 onMounted(() => {
   if (!store.facturasLoaded) store.fetchFacturas();
   if (!store.proveedoresLoaded) store.fetchProveedores();
   if (!store.categoriasLoaded) store.fetchCategorias();
+});
+
+/** Facturas con requiereRevision primero, y si el filtro está activo, solo esas */
+const facturasVisibles = computed(() => {
+  const lista = soloRevision.value
+      ? store.facturas.filter(f => f.requiereRevision)
+      : store.facturas;
+
+  return [...lista].sort((a, b) => (b.requiereRevision ? 1 : 0) - (a.requiereRevision ? 1 : 0));
 });
 
 function aplicarFiltros() {
@@ -32,6 +42,7 @@ function limpiarFiltros() {
   filtroCategoriaId.value = null;
   filtroDesde.value = null;
   filtroHasta.value = null;
+  soloRevision.value = false;
   store.fetchFacturas();
 }
 
@@ -57,9 +68,19 @@ function verDetalle(factura) {
       <pv-date-picker v-model="filtroHasta" placeholder="Hasta" dateFormat="yy-mm-dd" showIcon />
       <pv-button label="Filtrar" @click="aplicarFiltros" />
       <pv-button label="Limpiar" severity="secondary" text @click="limpiarFiltros" />
+
+      <label class="revision-toggle">
+        <input type="checkbox" v-model="soloRevision" />
+        Solo con revisión pendiente
+      </label>
     </div>
 
-    <pv-data-table :value="store.facturas" @row-click="e => verDetalle(e.data)" class="clickable-rows">
+    <pv-data-table :value="facturasVisibles" @row-click="e => verDetalle(e.data)" class="clickable-rows">
+      <pv-column header="">
+        <template #body="{ data }">
+          <i v-if="data.requiereRevision" class="pi pi-exclamation-triangle icono-alerta" title="Requiere revisión" />
+        </template>
+      </pv-column>
       <pv-column field="tipo" header="Tipo" />
       <pv-column header="Proveedor">
         <template #body="{ data }">{{ store.getProveedorLabel(data.proveedorId) }}</template>
@@ -90,5 +111,7 @@ function verDetalle(factura) {
 .header-row { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }
 .actions { display: flex; gap: 0.75rem; }
 .filters { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; }
+.revision-toggle { display: flex; align-items: center; gap: 0.4rem; color: #374151; font-size: 0.95rem; cursor: pointer; }
 .clickable-rows :deep(tr) { cursor: pointer; }
+.icono-alerta { color: #ef4444; }
 </style>

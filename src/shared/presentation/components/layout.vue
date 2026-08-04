@@ -27,6 +27,7 @@ function logout() {
         <template #end>
           <div class="right-actions">
             <router-link to="/invoicing/facturas" class="nav-link">Facturas</router-link>
+            <router-link to="/invoicing/proveedores" class="nav-link">Proveedores</router-link>
             <router-link to="/invoicing/resumen" class="nav-link">Resumen de gastos</router-link>
 
             <pv-button label="Cerrar sesión" class="logout-btn" rounded text @click="logout" />
