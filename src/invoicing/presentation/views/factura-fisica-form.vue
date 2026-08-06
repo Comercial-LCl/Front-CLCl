@@ -17,6 +17,9 @@ const fase = ref('escaneando'); // 'escaneando' -> 'revisando' -> 'foto' -> 'env
 const errorMsg = ref('');
 const consultandoRuc = ref(false);
 const procesandoQr = ref(false);
+const modoEscaneo = ref(null); // null (sin elegir) | 'camara' | 'lector'
+const lectorBuffer = ref('');
+const lectorInputRef = ref(null);
 
 const camaras = ref([]);
 const camaraSeleccionada = ref(null);
@@ -256,6 +259,32 @@ function ingresarManualmente() {
   errorMsg.value = '';
   fase.value = 'revisando';
 }
+function elegirModoCamara() {
+  modoEscaneo.value = 'camara';
+  iniciarEscaneo();
+}
+
+function elegirModoLector() {
+  modoEscaneo.value = 'lector';
+  nextTick(() => lectorInputRef.value?.focus());
+}
+
+/** El lector físico "escribe" el contenido del QR como si fuera un teclado y
+ *  remata con Enter — usamos el mismo parser que ya procesa el resultado de la cámara. */
+async function onLectorEnter() {
+  const texto = lectorBuffer.value.trim();
+  lectorBuffer.value = '';
+  if (!texto) return;
+  await procesarTextoQr(texto);
+}
+
+/** Si el input pierde foco (usuario hace click en otro lado), lo recupera —
+ *  el lector solo funciona si el input tiene el foco cuando "escribe". */
+function reenfocarLector() {
+  if (modoEscaneo.value === 'lector' && fase.value === 'escaneando') {
+    nextTick(() => lectorInputRef.value?.focus());
+  }
+}
 
 function irATomarFoto() {
   fase.value = 'foto';
@@ -340,8 +369,9 @@ onBeforeUnmount(() => {
 });
 
 onMounted(() => {
-  iniciarEscaneo();
+  // La cámara ya no arranca sola: se inicia recién cuando el usuario elige "Usar cámara".
 });
+
 </script>
 
 <template>
@@ -352,7 +382,7 @@ onMounted(() => {
 
     <h2>Registrar factura física</h2>
 
-    <div class="camera-wrap" v-show="fase !== 'enviando'">
+    <div class="camera-wrap" v-show="fase === 'foto' || (fase === 'escaneando' && modoEscaneo === 'camara')">
       <video ref="videoRef" class="camera-video" v-show="!fotoBlob"></video>
 
       <div v-if="fase === 'escaneando' || (fase === 'foto' && !fotoBlob)" class="scan-overlay">
@@ -390,52 +420,87 @@ onMounted(() => {
     </div>
 
     <template v-if="fase === 'escaneando'">
-      <p class="hint">Apunta la cámara al código QR, dentro del recuadro.</p>
-      <p class="hint hint-tip">
-        Si hay mucha luz o reflejos, inclina un poco el papel o hazle sombra con la mano —
-        y si está arrugado, estíralo con la mano antes de escanear.
-      </p>
-      <p v-if="hintProgresivo" class="hint hint-progresivo">{{ hintProgresivo }}</p>
-      <p v-if="procesandoQr" class="hint hint-progresivo">Analizando la imagen, un momento…</p>
-
-      <div class="camara-selector" v-if="camaras.length > 1">
-        <pv-select
-            v-model="camaraSeleccionada"
-            :options="camaras"
-            optionLabel="label"
-            optionValue="id"
-            placeholder="Elegir cámara"
-            @change="cambiarCamara"
-        />
+      <div v-if="!modoEscaneo" class="modo-selector">
+        <p class="hint">¿Cómo quieres leer el código QR de la factura?</p>
+        <div class="modo-botones">
+          <pv-button label="Usar cámara" icon="pi pi-camera" @click="elegirModoCamara" />
+          <pv-button label="Usar lector físico" icon="pi pi-qrcode" severity="secondary" @click="elegirModoLector" />
+        </div>
       </div>
 
-      <div class="scan-alt-actions">
-        <pv-button
-            label="No detecta solo — tomar foto del QR"
-            icon="pi pi-camera"
-            severity="secondary"
-            text
-            :loading="procesandoQr"
-            @click="capturarFotoQr"
-        />
-        <pv-button
-            label="Mi cámara no enfoca — subir foto del QR"
-            icon="pi pi-image"
-            severity="secondary"
-            text
-            :disabled="procesandoQr"
-            @click="abrirSelectorImagenQr"
-        />
-        <input ref="qrFileInput" type="file" accept="image/*" hidden @change="onQrImagenSeleccionada" />
+      <template v-else-if="modoEscaneo === 'camara'">
+        <p class="hint">Apunta la cámara al código QR, dentro del recuadro.</p>
+        <p class="hint hint-tip">
+          Si hay mucha luz o reflejos, inclina un poco el papel o hazle sombra con la mano —
+          y si está arrugado, estíralo con la mano antes de escanear.
+        </p>
+        <p v-if="hintProgresivo" class="hint hint-progresivo">{{ hintProgresivo }}</p>
+        <p v-if="procesandoQr" class="hint hint-progresivo">Analizando la imagen, un momento…</p>
+
+        <div class="camara-selector" v-if="camaras.length > 1">
+          <pv-select
+              v-model="camaraSeleccionada"
+              :options="camaras"
+              optionLabel="label"
+              optionValue="id"
+              placeholder="Elegir cámara"
+              @change="cambiarCamara"
+          />
+        </div>
+
+        <div class="scan-alt-actions">
+          <pv-button
+              label="No detecta solo — tomar foto del QR"
+              icon="pi pi-camera"
+              severity="secondary"
+              text
+              :loading="procesandoQr"
+              @click="capturarFotoQr"
+          />
+          <pv-button
+              label="Mi cámara no enfoca — subir foto del QR"
+              icon="pi pi-image"
+              severity="secondary"
+              text
+              :disabled="procesandoQr"
+              @click="abrirSelectorImagenQr"
+          />
+          <input ref="qrFileInput" type="file" accept="image/*" hidden @change="onQrImagenSeleccionada" />
+
+          <pv-button
+              label="El QR no se lee — ingresar datos manualmente"
+              severity="secondary"
+              text
+              :disabled="procesandoQr"
+              @click="ingresarManualmente"
+          />
+        </div>
+      </template>
+
+      <template v-else-if="modoEscaneo === 'lector'">
+        <p class="hint">Apunta el lector al código QR y escanea — el dato se completa solo.</p>
+
+        <div class="lector-panel" @click="reenfocarLector">
+          <i class="pi pi-qrcode lector-icono" />
+          <input
+              ref="lectorInputRef"
+              v-model="lectorBuffer"
+              class="lector-input"
+              type="text"
+              placeholder="Esperando lectura del escáner…"
+              autocomplete="off"
+              @keyup.enter="onLectorEnter"
+              @blur="reenfocarLector"
+          />
+        </div>
 
         <pv-button
-            label="El QR no se lee — ingresar datos manualmente"
+            label="Ingresar datos manualmente"
             severity="secondary"
             text
-            :disabled="procesandoQr"
             @click="ingresarManualmente"
         />
-      </div>
+      </template>
     </template>
 
     <div v-if="fase === 'revisando' || fase === 'foto'" class="review-panel">
@@ -621,5 +686,29 @@ onMounted(() => {
   display: flex;
   gap: 1rem;
   box-shadow: 0 -2px 8px rgba(0,0,0,0.08);
+}
+
+.modo-selector { display: flex; flex-direction: column; gap: 1rem; align-items: center; padding: 2rem 0; }
+.modo-botones { display: flex; gap: 1rem; }
+
+.lector-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 2rem;
+  border: 2px dashed #9ca3af;
+  border-radius: 8px;
+  background: #f9fafb;
+}
+.lector-icono { font-size: 2rem; color: #6b7280; }
+.lector-input {
+  width: 100%;
+  max-width: 320px;
+  text-align: center;
+  padding: 0.6rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 1rem;
 }
 </style>
